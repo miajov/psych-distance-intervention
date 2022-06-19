@@ -1,0 +1,388 @@
+---
+title: "Share task parcellation analyses"
+author: "Dani Cosme"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    highlight: tango
+    theme: united
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache = FALSE)
+
+options(scipen=999)
+```
+
+# load packages
+```{r}
+library(pacman)
+pacman::p_load(tidyverse, purrr, fs, knitr, lmerTest, ggeffects, kableExtra, boot, brms, tidybayes, modelr, install = TRUE)
+```
+
+# define functions
+```{r}
+source("https://gist.githubusercontent.com/benmarwick/2a1bb0133ff568cbe28d/raw/fb53bd97121f7f9ce947837ef1a4c65a73bffb3f/geom_flat_violin.R")
+
+# MLM results table function
+table_model = function(model_data) {
+  model_data %>%
+  broom.mixed::tidy(conf.int = TRUE) %>%
+  filter(effect == "fixed") %>%
+  rename("SE" = std.error,
+         "t" = statistic,
+         "p" = p.value) %>%
+  select(-group, -effect) %>%
+  mutate_at(vars(-contains("term"), -contains("p.value")), round, 2) %>%
+  mutate(term = gsub("cond", "", term),
+         term = gsub("\\(Intercept\\)", "intercept (control)", term),
+         term = gsub("condother", "other", term),
+         term = gsub("condself", "self", term),
+         term = gsub("sitePhiladelphia", "site (Philadelphia)", term),
+         term = gsub(":", " x ", term),
+         p = ifelse(p < .001, "< .001",
+                    ifelse(p == 1, "1.000", gsub("0.(.*)", ".\\1", sprintf("%.3f", p)))),
+         `b [95% CI]` = sprintf("%.2f [%0.2f, %.2f]", estimate, conf.low, conf.high)) %>%
+  select(term, `b [95% CI]`, df, t, p) %>%
+  kable()  %>%
+  kableExtra::kable_styling()
+}
+```
+
+# define aesthetics
+```{r}
+# font_add_google("Josefin Sans", "josefin")
+# showtext_auto()
+
+palette_condition = c("#bb3e03", "#005f73", "#ee9b00") #fd0000
+palette_sharing = c("#0a9396", "#ee9b00")
+palette_dv = c("#ee9b00", "#005f73", "#56282D")
+
+plot_aes = theme_minimal() +
+  theme(legend.position = "top",
+        legend.text = element_text(size = 12),
+        text = element_text(size = 16, family = "Futura Medium"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text = element_text(color = "black"),
+        axis.line = element_line(colour = "black"),
+        axis.ticks.y = element_blank())
+```
+
+# prep data {.tabset}
+## load and tidy data
+```{r}
+read_events = function(file) {
+  read.csv(file, stringsAsFactors = FALSE, sep = "\t", colClasses = "character") %>%
+    mutate(file = file)
+}
+
+read_betas = function(file) {
+  read.csv(file, stringsAsFactors = FALSE)
+}
+
+events = fs::dir_ls("../../../data/events/", regexp = ".*share.*tsv", recurse = TRUE) %>%
+  map_dfr(read_events) %>%
+  extract(file, c("pID", "run"), "sub-(BPP[0-9]{2}|BPA[0-9]{2}).*run-([1-3]{1})") %>%
+  mutate_at(vars(c("onset", "duration", "block", "click", "index", "rt", "value")), funs(as.numeric)) %>%
+  mutate(key = ifelse(grepl("read", event_name) & lead(trial_type) == "rate", lead(key), key),
+         rt = ifelse(grepl("read", event_name) & lead(trial_type) == "rate", lead(rt), rt),
+         value = ifelse(grepl("read", event_name) & lead(trial_type) == "rate", lead(value), value),
+         event_name = as.character(event_name),
+         site = ifelse(grepl("A", pID), "Amsterdam", "Philadelphia")) %>%
+  filter(grepl("read", event_name)) %>%
+  rename("event" = event_name) %>%
+  arrange(pID, run, onset) %>%
+  group_by(pID) %>%
+  mutate(trial = row_number()) %>%
+  select(pID, run, trial, event, everything())
+
+key = read.csv("parcel_key.csv", stringsAsFactors = FALSE)
+other_parcels = c(81,82,182,183,74,185,99,200,89,194)
+self_parcels = c(88,84,86,192,97,199)
+
+betas = fs::dir_ls("../../../data/task-share_model-beta_atlas/", regexp = ".*csv") %>%
+  map_dfr(read_betas) %>%
+  mutate(pID = gsub("sub-", "", pID)) %>%
+  group_by(atlas) %>%
+  mutate(outlier = ifelse(global_mean > mean(global_mean, na.rm = TRUE) + 3 * sd(global_mean, na.rm = TRUE), "yes",
+                   ifelse(global_mean < mean(global_mean, na.rm = TRUE) - 3 * sd(global_mean, na.rm = TRUE), "yes", "no"))) %>%
+  unique() %>%
+  mutate(process = ifelse(parcel %in% other_parcels, "other", "self")) %>%
+  left_join(., key)
+
+merged_all = betas %>%
+  left_join(., events, by = c("pID", "event"))
+
+merged = merged_all %>%
+  filter(outlier == "no" | is.na(outlier)) %>%
+  group_by(pID, atlas, parcel) %>%
+  mutate(parameter_estimate_std = parameter_estimate / sd(parameter_estimate, na.rm = TRUE))
+```
+
+# visualize raw data {.tabset}
+## distributions
+```{r}
+betas %>%
+  ggplot(aes(parameter_estimate, fill = as.factor(parcel))) +
+  geom_density(color = NA, alpha = .5) +
+  facet_grid(~process) +
+  plot_aes
+```
+
+## distributions by condition
+```{r}
+merged %>%
+  ggplot(aes(parameter_estimate, fill = cond)) +
+  geom_density(color = NA, alpha = .5) +
+  facet_wrap(~as.factor(parcel)) +
+  scale_fill_manual(values = palette_condition) +
+  plot_aes
+```
+
+## relationship with sharing
+```{r}
+merged %>%
+  ggplot(aes(parameter_estimate_std, value, color = cond, fill = cond)) +
+  geom_point(alpha = .1) +
+  geom_smooth(method = "lm") +
+  scale_color_manual(values = palette_condition) +
+  scale_fill_manual(values = palette_condition) +
+  plot_aes
+```
+
+## relationship with sharing by process
+```{r}
+merged %>%
+  ggplot(aes(parameter_estimate_std, value, color = cond, fill = cond)) +
+  geom_point(alpha = .1) +
+  geom_smooth(method = "lm") +
+  facet_grid(~process) +
+  scale_color_manual(values = palette_condition) +
+  scale_fill_manual(values = palette_condition) +
+  plot_aes
+```
+
+## relationship with sharing by parcel
+```{r}
+merged %>%
+  ggplot(aes(parameter_estimate_std, value, color = as.factor(parcel), fill = as.factor(parcel))) +
+  geom_point(alpha = .1) +
+  geom_smooth(method = "lm") +
+  facet_grid(~process) +
+  #scale_color_manual(values = palette_condition) +
+  #scale_fill_manual(values = palette_condition) +
+  plot_aes
+```
+
+# brain ~ cond * process {.tabset}
+```{r}
+mod = lmer(parameter_estimate_std ~ 1 + cond * process + (0 + cond | pID) + (0 + cond | parcel),
+           data = merged,
+           control = lmerControl(optimizer = "bobyqa"))
+```
+
+## summary
+```{r}
+summary(mod)
+```
+
+## plot
+```{r}
+reForm = as.formula("~(0 + cond | parcel)")
+
+plot_data = with(merged, 
+                 expand.grid(cond = unique(cond), 
+                             parcel = unique(parcel),
+                             stringsAsFactors = F)) %>%
+  mutate(process = ifelse(parcel %in% self_parcels, "self", "other"),
+         pID = NA) %>%
+  left_join(., key)
+plot_data$expected = predict(mod, newdata = plot_data, re.form = reForm)
+#plot_data$expected_mean = predict(mod, newdata = plot_data, re.form = NA)
+
+ggeffects::ggpredict(mod, terms = c("cond", "process")) %>%
+  data.frame() %>%
+  rename("cond" = x,
+         "process" = group) %>%
+  ggplot(aes(cond, predicted, color = process, fill = process)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, group = process), alpha = .2, color = NA) +
+  stat_summary(data = plot_data, aes(group = parcel, y = expected), fun.y = "mean", geom = "line", alpha = .5) +
+  geom_line(aes(group = process), size = 2) + 
+  # geom_label_repel(data = plot_data, aes(label = label,  y = expected),
+  #                 nudge_x = 1,
+  #                 na.rm = TRUE)
+  #stat_summary(aes(group = parcel, y = expected_mean), fun.y = "mean", geom = "line", size = 2) +
+  plot_aes
+```
+
+# brms {.tabset}
+## fit model 
+```{r}
+# mod_brm = brms::brm(parameter_estimate_std ~ 1 + cond * process + (0 + cond | pID) + (0 + cond | parcel),
+#                     data = merged, cores = 8, iter = 1000, silent = TRUE, seed = 6523)
+# 
+# saveRDS(mod_brm, "models/brm_parcellation.RDS")
+mod_brm = readRDS("models/brm_parcellation.RDS")
+summary(mod_brm)
+```
+
+## plots {.tabset}
+### by condition
+```{r}
+mod_brm %>%
+  spread_draws(r_parcel[condition, term]) %>%
+  rename("parcel" = condition,
+         "condition" = term) %>%
+  ungroup() %>%
+  mutate(condition_mean = r_parcel,
+         condition = gsub("cond", "", condition)) %>%
+  group_by(condition) %>%
+  mutate(mean = mean(condition_mean, na.rm = TRUE),
+         process = ifelse(parcel %in% self_parcels, "self", "other")) %>%
+  left_join(., key) %>%
+  mutate(parcel_label = sprintf("%s %s", label, parcel)) %>%
+  ggplot(aes(x = condition_mean, y = process, fill = condition)) +
+  stat_halfeyeh(alpha = .5) +
+  scale_fill_manual(values = palette_condition) +
+  plot_aes
+```
+
+### by parcel and condition
+```{r, fig.height = 9}
+mod_brm %>%
+  spread_draws(r_parcel[condition, term]) %>%
+  rename("parcel" = condition,
+         "condition" = term) %>%
+  ungroup() %>%
+  mutate(condition_mean = r_parcel,
+         condition = gsub("cond", "", condition)) %>%
+  group_by(condition, parcel) %>%
+  mutate(mean = mean(condition_mean, na.rm = TRUE),
+         process = ifelse(parcel %in% self_parcels, "self", "other")) %>%
+  left_join(., key) %>%
+  mutate(parcel_label = sprintf("%s %s", label, parcel)) %>%
+  ggplot(aes(x = condition_mean, y = reorder(parcel_label, mean), fill = condition, alpha = process)) +
+  stat_halfeyeh() +
+  scale_fill_manual(values = palette_condition) +
+  scale_alpha_manual(values = c(.25, .75)) +
+  plot_aes
+```
+
+### condition differences by parcel
+```{r, fig.height = 8, fig.width = 9}
+mod_brm %>%
+  spread_draws(r_parcel[condition, term]) %>%
+  rename("parcel" = condition,
+         "condition" = term) %>%
+  spread(condition, r_parcel) %>%
+  mutate(process = ifelse(parcel %in% self_parcels, "self", "mentalizing"),
+         `self > control` = condself - condcontrol,
+         `other > control` = condother - condcontrol) %>%
+  select(-contains("cond")) %>%
+  gather(diff, condition_mean, contains("control")) %>%
+  left_join(., key) %>%
+  group_by(parcel) %>%
+  mutate(mean = mean(condition_mean, na.rm = TRUE),
+         parcel_label = sprintf("%s %s", label, parcel)) %>%
+  ggplot(aes(x = condition_mean, y = reorder(parcel_label, mean), fill = diff, alpha = process)) +
+  geom_vline(xintercept = 0, alpha = .5) +
+  stat_halfeyeh() +
+  scale_fill_manual(name = "contrast", values = c(palette_condition[2], palette_condition[3])) +
+  scale_alpha_manual(values = c(.25, .75)) +
+  labs(x = "\n difference between experimental and control conditions", y = "") +
+  plot_aes
+```
+
+### self v other differences by parcel
+```{r, fig.height = 9}
+mod_brm %>%
+  spread_draws(r_parcel[condition, term]) %>%
+  rename("parcel" = condition,
+         "condition" = term) %>%
+  spread(condition, r_parcel) %>%
+  mutate(process = ifelse(parcel %in% self_parcels, "self", "other"),
+         `self > other` = condself - condother) %>%
+  select(-contains("cond")) %>%
+  left_join(., key) %>%
+  group_by(parcel) %>%
+  mutate(mean = mean(`self > other`, na.rm = TRUE),
+         parcel_label = sprintf("%s %s", label, parcel)) %>%
+  ggplot(aes(x = `self > other`, y = reorder(parcel_label, mean), fill = process)) +
+  stat_halfeyeh() +
+  geom_vline(xintercept = 0, alpha = .5) +
+  scale_fill_manual(values = c(palette_condition[2], palette_condition[3])) +
+  scale_alpha_manual(values = c(.25, .75)) +
+  labs(x = "\n difference between self and other conditions", y = "") +
+  plot_aes
+```
+
+# sharing ~ brain {.tabset}
+## fit model
+```{r}
+merged_sharing = merged %>%
+  mutate(process = as.numeric(recode(process, "self" = ".5", "other" = "-.5")))
+
+# mod_brm_sharing = brms::brm(value ~ parameter_estimate_std * process +
+#                       (1 + parameter_estimate_std | pID) + (1 * parameter_estimate_std | parcel),
+#                     data = merged_sharing, cores = 8, iter = 1000, silent = TRUE, seed = 6523)
+# 
+# saveRDS(mod_brm_sharing, "models/brm_parcellation_sharing.RDS")
+mod_brm_sharing = readRDS("models/brm_parcellation_sharing.RDS")
+summary(mod_brm_sharing)
+```
+
+## plots {.tabset}
+### by facet
+```{r, fig.width=10, fig.height=10}
+data_plot_draws = merged_sharing %>%
+  ungroup() %>%
+  data_grid(parameter_estimate_std = seq_range(parameter_estimate_std, n = 10), value, parcel, process) %>%
+  mutate(pID = "") %>%
+  filter(!(process == .5 & parcel %in% other_parcels) & !(process == -.5 & parcel %in% self_parcels)) %>%
+  # NOTE: this shows the use of ndraws to subsample within add_epred_draws()
+  # ONLY do this IF you are planning to make spaghetti plots, etc.
+  # NEVER subsample to a small sample to plot intervals, densities, etc.
+  add_epred_draws(mod_brm_sharing, ndraws = 500, allow_new_levels = TRUE) %>%
+  left_join(., key)   # sample 100 means from the posterior
+
+data_plot_draws %>%
+  mutate(process = ifelse(process == .5, "self", "mentalizing")) %>%
+  ggplot(aes(x = parameter_estimate_std, y = value, color = process, group = label)) +
+  geom_line(aes(y = .epred, group = .draw), alpha = .05) +
+  stat_lineribbon(aes(y = .epred), .width = 0, size = 2) +
+  facet_wrap(~ parcel) +
+  scale_fill_manual(values = "grey", guide = FALSE) + 
+  scale_color_manual(values = palette_dv) + 
+  plot_aes
+```
+
+### average by process
+```{r}
+data_plot = merged_sharing %>%
+  ungroup() %>%
+  data_grid(parameter_estimate_std = seq_range(parameter_estimate_std, n = 10), value, parcel, process) %>%
+  mutate(pID = "") %>%
+  filter(!(process == .5 & parcel %in% other_parcels) & !(process == -.5 & parcel %in% self_parcels)) %>%
+  add_epred_rvars(mod_brm_sharing, allow_new_levels = TRUE) %>%
+  left_join(., key)
+
+data_plot %>%
+  mutate(process = ifelse(process == .5, "self", "mentalizing")) %>%
+  ggplot(aes(x = parameter_estimate_std, y = value, group = label, color = process)) +
+  stat_dist_lineribbon(aes(dist = .epred), .width = c(0), alpha = .25) +
+  # geom_point(data = mutate(merged_sharing, process = ifelse(process == .5, "self", "mentalizing")),
+  #            aes(color = process), alpha = .2, position = position_jitter(height = .1)) +
+  scale_color_manual(values = palette_dv) + 
+  scale_fill_manual(values = "grey50", guide = FALSE) +
+  plot_aes
+```
+

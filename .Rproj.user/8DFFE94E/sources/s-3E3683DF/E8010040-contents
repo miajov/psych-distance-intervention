@@ -1,0 +1,325 @@
+---
+title: "Effects of psychological distance on drinking"
+author: "Mia Jovanova & Dani Cosme"
+date: "4/11/2022"
+output: 
+  html_document:
+    code_folding: show
+    highlight: tango
+    number_sections: yes
+    theme: united
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+urlcolor: blue
+editor_options: 
+  chunk_output_type: inline
+---
+**Background**
+
+Using two randomized experiments, we examine whether theory-driven strategies to create psychological distance—mindfulness and perspective-taking—administered via smartphones, can reduce drinking in the daily lives of young adults over 28 days (Study1, N = 108; Study 2, N=219).
+
+**Background** MJ next to add plots!
+
+```{r, include=FALSE}
+rm(list=ls()) #Clear everything
+```
+
+```{r, include=F}
+#Load in packages
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(dplyr,  kableExtra, DataCombine, sjmisc, sjPlot, janitor, reshape, glmmTMB, psych, sjPlot, coefplot2) # add the packages needed
+options(warn=-1)
+```
+
+# 1. Prepare Data
+
+## Load and merge data
+
+```{r,include=T, message=FALSE}
+### Study 1 
+#Load baseline variables (information about participant condition, demographics and drinking prior to intervention)
+baseline <- read.csv("~/Box Sync/CurrentProjects_Penn/MURI/Papers/EMA_intervention_effects/Study1/baseline_EMA_ppts_01_07.csv", stringsAsFactors = FALSE) 
+baseline$shineid <- baseline$pID
+
+#Load EMA variables 
+EMA1 <- read.csv("~/Box Sync/CurrentProjects_Penn/MURI/Papers/EMA_intervention_effects/Study1/SHINE_EMA_May19_2020.csv", stringsAsFactors = FALSE)
+#remove 1ppt due to technical app difficulties
+EMA1 <- EMA1[which(EMA1$SHINEID!="muri035"),]
+EMA1$shineid <- tolower(EMA1$SHINEID)
+#Merge baseline and EMA 
+EMA1 <- merge(baseline,EMA1, by = "shineid")
+
+### Study 2 
+EMA2 = read.csv("~/Box Sync/CurrentProjects_Penn/MURI/Papers/EMA_intervention_effects/Study2/EMA_online_only_subset.csv", stringsAsFactors = FALSE)
+#condition file 
+covidgroups = read.csv("~/Box Sync/CurrentProjects_Penn/MURI/Papers/EMA_intervention_effects/Study2/MURI_covid_df_groups.csv", stringsAsFactors = FALSE) %>% 
+  dplyr::select(SHINEID, groupID_full)
+EMA2 = merge(EMA2,covidgroups, by="SHINEID")
+EMA2$groupID = EMA2$groupID_full
+#remove three duplicate participants and one who participated in study 1 (4 total)
+EMA2 <- EMA2[which(EMA2$SHINEID!="muri083"),]
+EMA2 <- EMA2[which(EMA2$SHINEID!="muri558"),]
+EMA2 <- EMA2[which(EMA2$SHINEID!="muri411"),]
+EMA2 <- EMA2[which(EMA2$SHINEID!="muri346"),]
+#create condition variable
+EMA2 = EMA2 %>%
+  mutate(Condition = case_when(
+    Pak == "A"  ~ 'control', 
+    Pak == "B"  ~ 'mindful', 
+    Pak == "C"  ~ 'mindful', 
+    Pak == "D"  ~ 'perspective', 
+    Pak == "E"  ~ 'perspective'))
+```
+
+## 2. Create variables:
+
+###  Active vs. inactive week
+
+First, we create a condition_week variable that matches each intervention prompt to a corresponding condition: control, mindful, or perspective. To do this, we recode the original prompt names from EMA codebook: A1/A2 = Control; B1/B2 = Mindfulness; C1/C2 = Perspective Taking 
+
+```{r,include=T}
+####Study 1
+EMA1$condition_week[EMA1$Session.Name=="PROMPTA"] <-"control"
+EMA1$condition_week[EMA1$Session.Name=="PROMPTA1"] <-"control"
+EMA1$condition_week[EMA1$Session.Name=="PROMPTA2"] <-"control"
+EMA1$condition_week[EMA1$Session.Name=="PROMPTB1"] <-"mindful"
+EMA1$condition_week[EMA1$Session.Name=="PROMPTB2"] <-"mindful"
+EMA1$condition_week[EMA1$Session.Name=="PROMPTC1"] <-"peerdown"
+EMA1$condition_week[EMA1$Session.Name=="PROMPTC2"] <-"peerdown"
+
+#In the next section, we will *lag*'condition_week' because the first prompt is in the evening.  
+
+#To lag, we first order the dataframe by date before lagging 
+EMA1$Date <- as.POSIXct(EMA1$Notification.Time, format = "%m/%d/%y %H:%M")
+attach(EMA1)
+EMA1 <- EMA1[order(EMA1$SHINEID, EMA1$Date),]
+detach(EMA1)
+
+#Next, we lag the condition_week variable 
+EMA1 <- slide(EMA1, Var = "condition_week", GroupVar = "SHINEID", slideBy = -1)
+EMA1 <- reshape::rename(EMA1, c("condition_week-1"="ConditionWeekLag"))
+EMA1$ConditionWeek <- paste(EMA1$condition_week,EMA1$ConditionWeekLag) 
+
+attach(EMA1)
+EMA1$ConditionWeek[ConditionWeek=="NA NA"] <- NA
+EMA1$ConditionWeek[ConditionWeek=="mindful NA"] <- "mindful"
+EMA1$ConditionWeek[ConditionWeek=="NA mindful"] <- "mindful"
+EMA1$ConditionWeek[ConditionWeek=="control NA"] <- "control"
+EMA1$ConditionWeek[ConditionWeek=="NA control"] <- "control"
+EMA1$ConditionWeek[ConditionWeek=="peerdown NA"] <- "peerdown"
+EMA1$ConditionWeek[ConditionWeek=="NA peerdown"] <- "peerdown"
+EMA1$ConditionWeek[ConditionWeek=="NA NA" & Session.Name=="FirstMorning"] <- "control"
+detach(EMA1)
+
+#Create a binary intervention variable to indicate whether on intervention week vs. off week (without separating mindful vs. control)
+EMA1$active_week = recode(EMA1$ConditionWeek, 'peerdown' = "active", 'mindful' = "active", 'NA' = 'NA')
+
+
+####Study 2
+attach(EMA2)
+EMA2$Session.Name <-as.factor(EMA2$Session.Name)
+#EMA2$condition_week=NA
+EMA2$condition_week[EMA2$Session.Name=="PROMPT A"] <-"control"
+EMA2$condition_week[EMA2$Session.Name=="PROMPT A1"] <-"control"
+EMA2$condition_week[EMA2$Session.Name=="PROMPT A2"] <-"control"
+EMA2$condition_week[EMA2$Session.Name=="PROMPT B1"] <-"mindful"
+EMA2$condition_week[EMA2$Session.Name=="PROMPT B2"] <-"mindful"
+EMA2$condition_week[EMA2$Session.Name=="PROMPT C1"] <-"peerdown"
+EMA2$condition_week[EMA2$Session.Name=="PROMPT C2"] <-"peerdown"
+detach(EMA2)
+
+#Next, order dataframe by date before pushing the condition weeek variable forward
+EMA2$Date <- as.POSIXct(EMA2$Notification.Time, format = "%m/%d/%y %H:%M")
+attach(EMA2)
+EMA2 <- EMA2[order(EMA2$SHINEID, EMA2$Date),]
+detach(EMA2)
+
+#Push condition week variable forward to account for lag from the prompt before 
+EMA2 <- slide(EMA2, Var = "condition_week", GroupVar = "SHINEID", slideBy = -1)
+library(reshape)
+EMA2 <- reshape::rename(EMA2, c("condition_week-1"="ConditionWeekLag"))
+EMA2$ConditionWeek <- paste(EMA2$condition_week,EMA2$ConditionWeekLag) 
+
+attach(EMA2)
+EMA2$ConditionWeek[ConditionWeek=="NA NA"] <- NA
+EMA2$ConditionWeek[ConditionWeek=="mindful NA"] <- "mindful"
+EMA2$ConditionWeek[ConditionWeek=="NA mindful"] <- "mindful"
+EMA2$ConditionWeek[ConditionWeek=="control NA"] <- "control"
+EMA2$ConditionWeek[ConditionWeek=="NA control"] <- "control"
+EMA2$ConditionWeek[ConditionWeek=="peerdown NA"] <- "peerdown"
+EMA2$ConditionWeek[ConditionWeek=="NA peerdown"] <- "peerdown"
+EMA2$ConditionWeek[ConditionWeek=="NA NA" & Session.Name=="First Morning"] <- "control"
+detach(EMA2)
+
+#Create a binary intervention variable to indicate whether on intervention week vs. off week (without separating mindful vs. control)
+EMA2$active_week = recode(EMA2$ConditionWeek, 'peerdown' = "active", 'mindful' = "active", 'NA' = 'NA')
+```
+
+###  Signal count
+
+```{r, include=T}
+#Create a signals count variable
+#subset dataframe to only assessments and exclude the intervention prompts to get survey signals
+#Create a signals count variable
+
+EMA1 <- EMA1[which(EMA1$Session.Name=="Morning" | EMA1$Session.Name=="Evening" |
+                   EMA1$Session.Name=="FirstMorning"),]
+
+EMA1$signal_count <- with(EMA1, ave(ID,ID, FUN = seq_along)) 
+EMA1$signal_count <- as.numeric(EMA1$signal_count)
+#double checking it looks correct all 108 participants and up to 56
+Check.agg <- aggregate(signal_count ~ ID, EMA1, max)
+
+
+EMA2 <- EMA2[which(EMA2$Session.Name=="Morning Survey" | EMA2$Session.Name=="Evening" |
+                   EMA2$Session.Name=="First Morning"),]
+
+EMA2$signal_count <- with(EMA2, ave(ID,ID, FUN = seq_along)) 
+EMA2$signal_count <- as.numeric(EMA2$signal_count)
+#double checking it looks correct all 108 participants and up to 56
+Check.agg <- aggregate(signal_count ~ ID, EMA2, max)
+```
+
+
+###  Social weekend
+
+```{r, include=T}
+###Study 1
+#First check day of week variable
+table(EMA1$DayOfWeek)
+#Friday    Monday  Saturday    Sunday  Thursday   Tuesday Wednesday 
+#852       850       850       850       850       850       851
+
+#create social weekend variable by recoding day of week variable
+EMA1$SocialWeekend <- ifelse(EMA1$DayOfWeek == "Thursday" | EMA1$DayOfWeek == "Friday"
+                            | EMA1$DayOfWeek == "Saturday",
+                            c("Weekend"), c("Week"))
+
+#First order by date before lagging weekend variable 
+attach(EMA1)
+EMA1 <- EMA1[order(EMA1$SHINEID, EMA1$Date),]
+detach(EMA1)
+EMA1 <- slide(EMA1, Var = "SocialWeekend", GroupVar = "SHINEID", slideBy = -1)
+EMA1 <- reshape::rename(EMA1, c("SocialWeekend-1"="SocialWeekendLag"))
+#EMA$SocialWeekendUse <- paste(EMA$SocialWeekend,EMA$SocialWeekendLag)
+#We need to adjust social weekend for the first morning that has NA beause of lagging
+
+#Because Day of week is not lagged, these are what we want social weekends to be on the first morning
+#Fridays, Saturdays, Sundays (on these days participants are reporting on yesterday's - thur fri sat - alcohol use)
+attach(EMA1)
+EMA1$SocialWeekendLag[Session.Name== "FirstMorning" & DayOfWeek == "Monday"] <- "Week"
+EMA1$SocialWeekendLag[Session.Name== "FirstMorning" & DayOfWeek == "Tuesday"] <- "Week"
+EMA1$SocialWeekendLag[Session.Name== "FirstMorning" & DayOfWeek == "Wednesday"] <- "Week"
+EMA1$SocialWeekendLag[Session.Name== "FirstMorning" & DayOfWeek == "Thursday"] <- "Week"
+EMA1$SocialWeekendLag[Session.Name== "FirstMorning" & DayOfWeek == "Friday"] <- "Weekend"
+EMA1$SocialWeekendLag[Session.Name== "FirstMorning" & DayOfWeek == "Saturday"] <- "Weekend"
+EMA1$SocialWeekendLag[Session.Name== "FirstMorning" & DayOfWeek == "Sunday"] <- "Weekend"
+detach(EMA1)
+table(EMA1$SocialWeekendLag)
+
+###Study 2
+#create day of week variable
+EMA2$DayOfWeek <- strftime(EMA2$Date, "%A")
+
+#create social weekend variable
+EMA2$SocialWeekend <- ifelse(EMA2$DayOfWeek == "Thursday" | EMA2$DayOfWeek == "Friday"
+                            | EMA2$DayOfWeek == "Saturday",
+                            c("Weekend"), c("Week"))
+
+#order by date before pushing variable forward
+attach(EMA2)
+EMA2 <- EMA2[order(EMA2$SHINEID, EMA2$Date),]
+detach(EMA2)
+
+EMA2 <- slide(EMA2, Var = "SocialWeekend", GroupVar = "SHINEID", slideBy = -1)
+
+library(reshape)
+EMA2 <- reshape::rename(EMA2, c("SocialWeekend-1"="SocialWeekendLag"))
+
+#Need to plug in social weekend for the first morning that has NA beause of lagging
+#Thursdays Fridays and Saturdays are social weekend days
+#Because Day of week is not lagged, these are what we want social weekends to be on the first morning
+#Fridays, Saturdays, Sundays (on these days they are reporting on yesterday's - thur fri sat - alcohol use)
+attach(EMA2)
+EMA2$SocialWeekendLag[Session.Name== "First Morning" & DayOfWeek == "Monday"] <- "Week"
+EMA2$SocialWeekendLag[Session.Name== "First Morning" & DayOfWeek == "Tuesday"] <- "Week"
+EMA2$SocialWeekendLag[Session.Name== "First Morning" & DayOfWeek == "Wednesday"] <- "Week"
+EMA2$SocialWeekendLag[Session.Name== "First Morning" & DayOfWeek == "Thursday"] <- "Week"
+EMA2$SocialWeekendLag[Session.Name== "First Morning" & DayOfWeek == "Friday"] <- "Weekend"
+EMA2$SocialWeekendLag[Session.Name== "First Morning" & DayOfWeek == "Saturday"] <- "Weekend"
+EMA2$SocialWeekendLag[Session.Name== "First Morning" & DayOfWeek == "Sunday"] <- "Weekend"
+EMA2$SocialWeekendLag[SocialWeekendLag=="NA NA"] <- NA
+detach(EMA2)
+```
+
+
+###  Number of drinks
+
+```{r, include=T}
+#Create number of drinking (summing wine, beer and liquor drinks per survey)
+EMA1$drinks_number <- ifelse(EMA1$HadAlcohol == 1, EMA1$Num_Beer + EMA1$Num_Wine + EMA1$Num_Liquor, #sum drinks if HadAlcohol = 1
+                            ifelse(EMA1$HadAlcohol == 0, 0, #recode NA as 0 if HadAlcohol = 0
+                                   NA))
+###set the 3 largest improbable values to 16
+attach(EMA1)
+EMA1$drinks_number[drinks_number>16] <- 16
+detach(EMA1)
+
+
+####Study 23
+EMA2$drinks_number <- ifelse(EMA2$HadAlcohol == 1, EMA2$Num_Beer + EMA2$Num_Wine + EMA2$Num_Liquor, #sum drinks if HadAlcohol = 1
+                            ifelse(EMA2$HadAlcohol == 0, 0, #recode NA as 0 if HadAlcohol = 0
+                                   NA))
+
+### Number of alcohol responses
+####Study 1
+EMANAs1 <- EMA1[complete.cases(EMA1$HadAlcohol),]
+EMANAs1$countalc <- with(EMANAs1, ave(shineid, shineid, FUN = seq_along)) 
+EMANAs1$countalc <- as.numeric(EMANAs1$countalc)
+alc_max1 <- as.data.frame(aggregate(countalc~shineid, EMANAs1, max))
+
+alc_max1 <- reshape::rename(alc_max1, c("countalc"="NumberResponses"))
+#merge alcohol responses back to EMA
+EMA1 <- merge(EMA1, alc_max1, by="shineid")
+
+####Study 2
+EMANAs2 <- EMA2[complete.cases(EMA2$HadAlcohol),]
+EMANAs2$countalc <- with(EMANAs2, ave(SHINEID,SHINEID, FUN = seq_along)) 
+EMANAs2$countalc <- as.numeric(EMANAs2$countalc)
+length(unique(EMANAs2$SHINEID)) #218 already here
+alc_max2 <- as.data.frame(aggregate(countalc~SHINEID, EMANAs2, max))
+alc_max2 <- reshape::rename(alc_max2, c("countalc"="NumberResponses"))
+EMA2 <- merge(EMA2, alc_max2, by="SHINEID")
+length(unique(EMA2$SHINEID))
+```
+
+
+```{r,include=T}
+#double checking if sample sizes looks correct
+EMA_conditions1  = EMA1 %>%
+  distinct(SHINEID, .keep_all = T)  %>%
+  tabyl(Condition) %>%
+  adorn_totals("row") %>%
+  adorn_pct_formatting() %>%
+  knitr::kable() %>%
+  kable_styling(latex_options = "striped")
+EMA_conditions1
+
+
+EMA_conditions2  = EMA2 %>%
+  distinct(SHINEID, .keep_all = T)  %>%
+  tabyl(Condition) %>%
+  adorn_totals("row") %>%
+  adorn_pct_formatting() %>%
+  knitr::kable() %>%
+  kable_styling(latex_options = "striped")
+EMA_conditions2
+
+EMA1_df= EMA1 %>% dplyr::select (SHINEID, groupID,  Condition, SocialWeekendLag, active_week, signal_count, NumberResponses, HadAlcohol, drinks_number)
+write.csv(EMA1_df, "~/Box Sync/CurrentProjects_Penn/MURI/Papers/EMA_intervention_effects/Study1/Study1modeling.csv")
+
+EMA2_df = EMA2 %>% dplyr::select (SHINEID, groupID, Condition, SocialWeekendLag, active_week, signal_count, NumberResponses, HadAlcohol, drinks_number)
+write.csv(EMA2_df, "~/Box Sync/CurrentProjects_Penn/MURI/Papers/EMA_intervention_effects/Study2/Study2modeling.csv")
+```
+
