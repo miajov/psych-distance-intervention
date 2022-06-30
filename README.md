@@ -1,7 +1,6 @@
 # Psychological distance intervention reminders reduce alcohol consumption frequency
 
-This repository contains scripts for main analyses reported in: 
+This repository contains scripts and deidentified data for main analyses. 
 
-[**Psychological distance intervention reminders reduce alcohol consumption frequency in daily life**]
 
 
