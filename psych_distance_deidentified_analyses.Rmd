@@ -1,6 +1,6 @@
 ---
 title: "Psychological distance intervention reminders reduce alcohol consumption frequency in daily life"
-author: "Mia Jovanova"
+author: "XXX"
 date: "`r Sys.Date()`" 
 output: 
   html_document:
@@ -16,7 +16,7 @@ editor_options:
   chunk_output_type: inline
 ---
 
-<br><br> 
+<br>
 
 ```{r setup, include=F, warning=F}
 rm(list=ls()) 
@@ -46,8 +46,7 @@ interventions_s2 = EMA2 %>%
   mutate(active_week =relevel(factor(active_week), ref = 'control')) #factor main predictor and set inactive weeks as reference. 
 ```
 
-
-**Study Overview**
+# Study overview
 
 Using two randomized experiments, we examined whether theory-driven strategies to create psychological distance—mindfulness and perspective-taking—administered via smartphones, can reduce drinking in the daily lives of young adults over 28 days (Study1, N = `r length(unique(EMA1$id))`; Study 2, N = `r length(unique(EMA2$id))`).
 
@@ -359,7 +358,7 @@ coefplot2(m2, intercept = TRUE,
 ## Within-person {.tabset}
 
 
-We conducted two multilevel hurdle models, one for Study 1 and another for Study 2 to examine if the within-person effects of the psychological distance reminders on drinking frequency, presented in the main manuscript, remain robust when controlling for additional demographic variables. 
+We conducted two multilevel hurdle models, one for Study 1 and another for Study 2 to examine if the within-person effects of psychological distance reminders on drinking frequency, presented in the main manuscript, remain robust when controlling for demographic variables. 
 
 We ran parallel multilevel models to those presented in the main manuscript including gender, age, and race as covariates. 
 
